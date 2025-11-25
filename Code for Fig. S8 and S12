@@ -1,0 +1,272 @@
+# figS8 and S12_ko_analysis.R
+# 
+
+# ---- packages ----
+library(tidyverse)
+library(patchwork)
+library(psych)      # 原脚本载入，若未使用可移除
+library(vegan)      # vegdist, metaMDS, adonis2
+library(RColorBrewer)
+library(mdscore)    # 用到了 wald.test
+library(MASS)       # metaMDS 依赖
+
+# ---- helper: safe read ----
+safe_read <- function(path) {
+  if (!file.exists(path)) stop(paste("File not found:", path))
+  read.csv(path, row.names = 1, check.names = FALSE)
+}
+
+# ---- load common data ----
+niche_f <- safe_read("data/niche_forest.csv")
+niche_g <- safe_read("data/niche_grassland.csv")
+niche_w <- safe_read("data/niche_wetland.csv")
+
+mags <- safe_read("data/mags_basal.csv")
+geno_modu <- safe_read("data/genome_module.csv")
+
+# ---- preprocess genome module table: 原脚本把前两行转置查看后又删除 ----
+# 若 genome_module 首两行为描述信息，去掉前两行并保留后续数值矩阵
+if (nrow(geno_modu) > 2) {
+  # 保留一份原始查看用的 a（可选）
+  a <- geno_modu[1:2,] %>% t() %>% as.data.frame()
+  colnames(a) <- c("name", "pathway")
+  # 去掉前两行（原脚本）
+  geno_modu_num <- geno_modu[-(1:2), , drop = FALSE]
+} else {
+  geno_modu_num <- geno_modu
+}
+
+# 确保 geno_modu_num 行名为 genome IDs（与 dat$Name 对应）
+# 如果geno_modu_num 的值为字符，一律尝试转 numeric（你后面做了 lapply）
+geno_modu_num[] <- lapply(geno_modu_num, function(x) as.numeric(as.character(x)))
+rownames(geno_modu_num) <- rownames(geno_modu_num)  # 保持原始 rownames
+
+# ---- utility: merge mags + niche by shared genomes ----
+merge_mags_niche <- function(niche_df, mags_df) {
+  shared <- intersect(rownames(niche_df), rownames(mags_df))
+  if (length(shared) == 0) stop("No shared genomes between niche and mags")
+  mags_sub  <- mags_df[shared, , drop = FALSE]
+  niche_sub <- niche_df[shared, , drop = FALSE]
+  dat <- cbind(mags_sub, niche_sub) %>% as.data.frame()
+  return(dat)
+}
+
+dat_f <- merge_mags_niche(niche_f, mags)
+dat_g <- merge_mags_niche(niche_g, mags)
+dat_w <- merge_mags_niche(niche_w, mags)
+
+# ---- utility: 从 ko_number 文件生成 genome x KO presence/absence 矩阵 ----
+# 输入：ko_number dataframe（必须含 genome, ko_number 列）
+# 输出：presence/absence 矩阵（rows = genome）
+ko_table_from_long <- function(ko_long) {
+  # ensure columns
+  required <- c("genome", "ko_number")
+  if (!all(required %in% colnames(ko_long))) stop("ko_number file must have genome and ko_number columns")
+  ko_long$value <- 1
+  ko_tmp <- ko_long %>%
+    dplyr::select(genome, ko_number, value) %>%
+    group_by(genome, ko_number) %>%
+    summarise(value = sum(value), .groups = "drop") %>%
+    pivot_wider(names_from = ko_number, values_from = value, values_fill = 0)
+  # to presence/absence
+  ko_pa <- ko_tmp %>% column_to_rownames(var = "genome")
+  ko_pa[ko_pa > 0] <- 1
+  ko_pa <- as.data.frame(ko_pa)
+  return(ko_pa)
+}
+
+# ---- core function: 对单个生态系统执行流程 ----
+# 输入：
+#   ko_path: ko_number CSV 路径
+#   dat: merged mags+niche dataframe (rows = genomes)
+#   geno_matrix: genome_module numeric matrix（row names 为 genome）
+# 输出：list 包含 ko_stats (GLM结果表), nmds_df (用于绘图的NMDS坐标表), ko_pa (presence/absence 矩阵)
+analyze_ecosystem <- function(ko_path, dat, geno_matrix, out_prefix) {
+  message("Processing: ", out_prefix)
+  ko_long <- safe_read(ko_path)
+  ko_pa_full <- ko_table_from_long(ko_long)
+  
+  # 取 dat 的基因组顺序子集
+  genomes <- rownames(dat)
+  ko_pa <- ko_pa_full[intersect(rownames(ko_pa_full), genomes), , drop = FALSE]
+  
+  # 如果没有任何 KO，返回空
+  if (nrow(ko_pa) == 0) stop(paste("No KO rows match genomes in", out_prefix))
+  
+  # 构建用于 GLM 的 dataframe：niche (meanFunction), ASV(genome id), genome (rownames), + KO 列
+  df_glm <- data.frame(
+    niche = dat$meanFunction,
+    ASV = rownames(dat),
+    genome = rownames(dat),
+    stringsAsFactors = FALSE
+  )
+  df_glm <- cbind(df_glm, ko_pa)
+  
+  # 对每个 KO 进行 logistic regression (presence ~ niche) 并用 wald.test 获取 p-value
+  ko_names <- colnames(ko_pa)
+  res_tab <- matrix(NA, nrow = length(ko_names), ncol = 3,
+                    dimnames = list(ko_names, c("slope","p","R2")))
+  for (k in ko_names) {
+    # 因为有的 KO 列可能是全 0/1，glm 可能会失败 -> 用 tryCatch 包裹
+    tryCatch({
+      mod <- glm(as.formula(paste0("`", k, "` ~ niche")), data = df_glm, family = binomial)
+      mo <- wald.test(mod, terms = 2)  # 2 表示 niche 的系数
+      slope <- coef(mod)["niche"]
+      pval <- mo$pvalue
+      R2 <- with(summary(mod), 1 - deviance/null.deviance)
+      res_tab[k, ] <- c(slope, pval, R2)
+    }, error = function(e) {
+      # 保持 NA
+      res_tab[k, ] <- c(NA, NA, NA)
+    })
+  }
+  res_tab <- as.data.frame(res_tab)
+  
+  # 保存结果
+  write.csv(res_tab, file = file.path("results", paste0(out_prefix, "_ko_stats.csv")))
+  
+  # 距离矩阵、adonis、NMDS
+  ad_genus <- vegdist(ko_pa, method = "bray")
+  ad_res <- adonis2(ad_genus ~ meanFunction, data = dat, permutations = 999)
+  message("adonis2 result for ", out_prefix, ":")
+  print(ad_res)
+  
+  NMDS <- metaMDS(ko_pa, distance = "bray", trymax = 50)
+  nmds_points <- as.data.frame(NMDS$points)
+  nmds_points$genome <- rownames(nmds_points)
+  nmds_points$niche <- dat[rownames(nmds_points), "meanFunction"]
+  colnames(nmds_points)[1:2] <- c("NMDS1", "NMDS2")
+  
+  # 图：NMDS 点按 niche 渐变着色
+  p_nmds <- ggplot(nmds_points, aes(NMDS1, NMDS2)) +
+    geom_point(aes(color = niche), size = 2, alpha = 0.4) +
+    scale_color_gradientn(colours = c("#264653","#2a9d8f","#e9c46a","#f4a261","#e76f51"),
+                          breaks = seq(0,1,by = 0.2)) +
+    theme_classic() +
+    theme(axis.text = element_text(colour = "black", size = 12),
+          axis.title = element_text(size = 14)) +
+    labs(title = paste0(out_prefix, " NMDS (stress=", round(NMDS$stress, 3), ")"), x = "MDS1", y = "MDS2")
+  
+  # 保存 NMDS 图
+  ggsave(p_nmds, filename = file.path("figures", paste0(out_prefix, "_nmds.pdf")), width = 4, height = 2.5)
+  
+  return(list(ko_stats = res_tab, adonis = ad_res, nmds = nmds_points, nmds_plot = p_nmds, ko_pa = ko_pa))
+}
+
+# ---- create output dirs if not exist ----
+dir.create("results", showWarnings = FALSE)
+dir.create("figures", showWarnings = FALSE)
+
+# ---- run for each ecosystem ----
+res_f <- analyze_ecosystem("data/ko_number_forest.csv", dat_f, geno_modu_num, "ko_forest")
+res_g <- analyze_ecosystem("data/ko_number_grassland.csv", dat_g, geno_modu_num, "ko_grassland")
+res_w <- analyze_ecosystem("data/ko_number_wetland.csv", dat_w, geno_modu_num, "ko_wetland")
+
+# ---- 汇总显著 KO (p < 0.05) ----
+ko_ff_sig <- res_f$ko_stats %>% rownames_to_column("ko") %>% filter(p < 0.05)
+ko_gg_sig <- res_g$ko_stats %>% rownames_to_column("ko") %>% filter(p < 0.05)
+ko_ww_sig <- res_w$ko_stats %>% rownames_to_column("ko") %>% filter(p < 0.05)
+
+write.csv(ko_ff_sig, file = "results/ko_forest_R2.csv", row.names = FALSE)
+write.csv(ko_gg_sig, file = "results/ko_grassland_R2.csv", row.names = FALSE)
+write.csv(ko_ww_sig, file = "results/ko_wetland_R2.csv", row.names = FALSE)
+
+# ---- 求交并合并（等价于你原来的流程，但更直观） ----
+fg <- intersect(ko_ff_sig$ko, ko_gg_sig$ko)
+fw <- intersect(ko_ff_sig$ko, ko_ww_sig$ko)
+gw <- intersect(ko_gg_sig$ko, ko_ww_sig$ko)
+total_unique <- unique(c(fg, fw, gw))
+
+# 构建 total3 类似结构：每 KO 在三个生态系统中的出现情况（0/1）
+total3 <- data.frame(name = total_unique, ff = 0, gg = 0, ww = 0, stringsAsFactors = FALSE)
+total3$ff[total3$name %in% ko_ff_sig$ko] <- 1
+total3$gg[total3$name %in% ko_gg_sig$ko] <- 1
+total3$ww[total3$name %in% ko_ww_sig$ko] <- 1
+
+# ---- 读取 kegg 与 map_ko 映射（原脚本后续用到） ----
+kegg <- safe_read("data/kegg.csv")
+map_ko <- safe_read("data/map_ko_name.csv")
+colnames(map_ko)[1] <- "ko"
+kegg_path <- safe_read("data/KEGG_pathway_ko.csv")
+colnames(kegg_path)[1] <- "level1_pathway_id"
+
+# ---- 处理方向（slope）信息：把 slope 置为 -1/1 ----
+# 从各生态系统的 ko_stats 中取出 slope 并转化
+slope_f <- res_f$ko_stats[total3$name, "slope", drop = FALSE] %>% as.data.frame()
+rownames(slope_f) <- rownames(res_f$ko_stats)[rownames(slope_f)]
+slope_f <- replace_na(slope_f, 0)
+
+slope_g <- res_g$ko_stats[total3$name, "slope", drop = FALSE] %>% as.data.frame()
+rownames(slope_g) <- rownames(res_g$ko_stats)[rownames(slope_g)]
+slope_g <- replace_na(slope_g, 0)
+
+slope_w <- res_w$ko_stats[total3$name, "slope", drop = FALSE] %>% as.data.frame()
+rownames(slope_w) <- rownames(res_w$ko_stats)[rownames(slope_w)]
+slope_w <- replace_na(slope_w, 0)
+
+slope_to_sign <- function(x) {
+  x[x > 0] <- 1
+  x[x < 0] <- -1
+  x[x == 0] <- 0
+  return(x)
+}
+
+s_f <- slope_to_sign(slope_f$`slope`)
+s_g <- slope_to_sign(slope_g$`slope`)
+s_w <- slope_to_sign(slope_w$`slope`)
+
+# 组合 total4（保留你原来的计算逻辑）
+total4 <- total3
+total4$ff <- total4$ff * s_f
+total4$gg <- total4$gg * s_g
+total4$ww <- total4$ww * s_w
+total4$to <- rowSums(total4[, c("ff","gg","ww")], na.rm = TRUE)
+
+# 把 na（第5列在你的脚本重命名）与过滤逻辑统一化
+# 筛选出在多个生态系统中方向不一致（原脚本挑选了 !na %in% c(-1,0,1)）
+# 这里我直接挑出 to 值不在 -1,0,1 的（表示至少在两个生态系统中方向不一致/累计）
+total5 <- total4 %>% filter(!to %in% c(-1,0,1))
+
+# ---- 将 KO 与 KEGG 表连接以获取 pathway 信息，然后输出 ko_1421.csv ----
+# 使用 kegg 的 fourth 列与 total5$name 对应（你的脚本使用 kegg$fourth）
+a_total3 <- kegg %>% filter(fourth %in% total5$name) %>% distinct(fourth, .keep_all = TRUE)
+rownames(a_total3) <- a_total3$fourth
+a_total3 <- a_total3[total5$name, , drop = FALSE]  # 按 total5 顺序排列
+
+total5_out <- cbind(total5, a_total3)
+colnames(total5_out)[1] <- "na2"
+write.csv(total5_out, file = "results/ko_1421.csv", row.names = FALSE)
+
+# ---- 通路统计并绘图（你的最后部分） ----
+# 统计每个 third pathway 下的 total / positive / negative，然后计算 ratio 并筛选 total > 5
+total5_out$third <- as.character(total5_out$third)
+t_a <- total5_out %>%
+  group_by(third) %>%
+  summarise(total = n(),
+            positive = sum(na > 0, na.rm = TRUE),
+            negative = sum(na < 0, na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(desc(positive / total), desc(total))
+
+t_a <- as.data.frame(t_a)
+t_a$ratio <- t_a$positive / t_a$total
+t_a_2 <- t_a %>% filter(total > 5)
+
+# 绘图（两个并排柱状图）
+p1 <- ggplot(t_a_2, aes(x = reorder(third, -ratio), y = ratio)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  geom_text(aes(label = total), vjust = -0.7, hjust = 0.5, size = 3) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p2 <- ggplot(t_a_2, aes(x = reorder(third, -ratio), y = ratio - 1)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p_all <- p1 + p2
+ggsave(p_all, filename = "figures/ko_barplot.pdf", width = 20, height = 10)
+
+message("All done. Results saved to /results and /figures")
+# ---- 建议保存 session info ----
+writeLines(capture.output(sessionInfo()), "results/sessionInfo.txt")
