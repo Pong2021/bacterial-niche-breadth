@@ -1,0 +1,108 @@
+# Figure 2c - Phylum-level niche breadth comparison across ecosystems
+
+## Load libraries
+library(tidyverse)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+
+## ---- 1. Read data -------------------------------------------------------
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+
+tax <- read.csv("Taxonomy_Filter.csv", row.names = 1)
+
+## ---- 2. Merge taxonomy --------------------------------------------------
+add_taxonomy <- function(niche_df, tax_df){
+  tax_sub <- tax_df[rownames(tax_df) %in% rownames(niche_df),]
+  cbind(niche_df, tax_sub) %>% as.data.frame()
+}
+
+niche_f <- add_taxonomy(niche_f, tax)
+niche_g <- add_taxonomy(niche_g, tax)
+niche_w <- add_taxonomy(niche_w, tax)
+
+## ---- 3. Define color palette --------------------------------------------
+# Must include all observed phyla
+col4 <- c(
+  "Abditibacteriota"="#A6CEE3","Acidobacteriota"="#89BCD9", "Actinobacteriota"="#6DAACF",
+  "Armatimonadota"="#5198C5","Bacteroidota"="#3586BB","Bdellovibrionota"="#247BB2",
+  "Caldatribacteriota"="#4391A9","Caldisericota"="#61A6A0","Calditrichota"="#80BC98",
+  "Campilobacterota"="#9ED18F","Chloroflexi"="#A8DA82","Cloacimonadota"="#8ECD6F",
+  "Cyanobacteria"="#73C05B","Dadabacteria"="#59B348","Deferrisomatota"="#3EA534",
+  "Deinococcota"="#499F38","Dependentiae"="#739E4E","Desulfobacterota"="#9C9C65",
+  "DTB120"="#C69B7C","Edwardsbacteria"="#EF9A92","Elusimicrobiota"="#F78686",
+  "Entotheonellaeota"="#F26C6C","FCPU426"="#ED5152","Fermentibacterota"="#E83638",
+  "Fibrobacterota"="#E31C1E","Firmicutes"="#E7392B","Fusobacteriota"="#ED5B3C",
+  "Gemmatimonadota"="#F89F5F","Hydrogenedentes"="#FDBD6C","Latescibacterota"="#FDB055",
+  "LCP-89"="#FDA33E","Methylomirabilota"="#FE9527","Modulibacteria"="#FE8810",
+  "Myxococcota"="#FC810C","NB1-j"="#F18C38","Nitrospinota"="#E69764",
+  "Nitrospirota"="#DBA191","Patescibacteria"="#D0ACBD","Planctomycetota"="#C0A6D0",
+  "Proteobacteria"="#AD8EC3","RCP2-54"="#9976B7","Spirochaetota"="#855EAA",
+  "Synergistota"="#71459E","TA06"="#7D5699","Unassigned"="#9C7E99",
+  "Verrucomicrobiota"="#BBA799","WPS-2"="#DACF99","WS2"="#F9F799",
+  "Zixibacteria"="#F1E285")
+
+
+## ---- 4. Remove phyla with very low counts ------------------------------
+filter_minor <- function(df, minor){
+  filter(df, !Phylum %in% minor)
+}
+
+minor_f <- c("Cloacimonadota","Deferrisomatota","DTB120","SAR324 clade(Marine group B)",
+             "Caldisericota","Campilobacterota","Fusobacteriota","Hydrogenedentes",
+             "Calditrichota","Dadabacteria","FCPU426","Nitrospinota","Dependentiae",
+             "Sumerlaeota","Sva0485")
+
+minor_g <- c("Caldisericota","Calditrichota","Dependentiae","Fermentibacterota",
+             "LCP-89","Synergistota","Fusobacteriota","Hydrogenedentes","FCPU426",
+             "SAR324 clade(Marine group B)","Deferrisomatota","Sumerlaeota")
+
+minor_w <- c("Caldatribacteriota","Cloacimonadota","DTB120","Edwardsbacteria",
+             "Fermentibacterota","Modulibacteria","Synergistota","TA06",
+             "Calditrichota","Dependentiae","FCPU426","Fusobacteriota","LCP-89",
+             "SAR324 clade(Marine group B)","Sumerlaeota","Abditibacteriota",
+             "Hydrogenedentes","Deferrisomatota")
+
+niche_f2 <- filter_minor(niche_f, minor_f)
+niche_g2 <- filter_minor(niche_g, minor_g)
+niche_w2 <- filter_minor(niche_w, minor_w)
+
+
+## ---- 5. Plot function ---------------------------------------------------
+plot_fun <- function(df){
+  ggplot(df, aes(x = reorder(Phylum, meanFunction), y = meanFunction, fill = Phylum)) +
+    geom_boxplot() +
+    theme_bw() +
+    scale_fill_manual(values = col4) +
+    labs(x = "", y = "Niche breadth") +
+    theme(text = element_text(size=12),
+          axis.text.y = element_text(color="black"),
+          axis.text.x = element_text(angle=90, hjust=1, vjust=.5, color="black"),
+          panel.grid = element_blank(),
+          panel.background = element_rect(color='black', fill='transparent'),
+          legend.position = "none")
+}
+
+plot_f <- plot_fun(niche_f2)
+plot_g <- plot_fun(niche_g2)
+plot_w <- plot_fun(niche_w2)
+
+
+## ---- 6. ANOVA ------------------------------------------------------------
+anova_f <- aov(meanFunction ~ Phylum, data=niche_f2)
+anova_g <- aov(meanFunction ~ Phylum, data=niche_g2)
+anova_w <- aov(meanFunction ~ Phylum, data=niche_w2)
+
+summary(anova_f)
+summary(anova_g)
+summary(anova_w)
+
+
+## ---- 7. Combine and save ------------------------------------------------
+plt_all <- plot_f / plot_g / plot_w
+
+plt_all
+
+ggsave(plt_all, file = "phylum_barplot2.pdf", width = 7, height = 14)
