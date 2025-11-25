@@ -1,0 +1,198 @@
+###############################################################
+## Fig.5d – Cross-ecosystem genomic module convergence analysis
+###############################################################
+
+## ------------------------------------------------------------
+## 0. Required packages
+## ------------------------------------------------------------
+library(tidyverse)
+library(psych)
+library(vegan)
+library(patchwork)
+library(RColorBrewer)
+library(MASS)
+library(mdscore)
+
+## ------------------------------------------------------------
+## 1. Load data
+## ------------------------------------------------------------
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+
+mags     <- read.csv("mags_basal.csv",       row.names = 1)
+geno_raw <- read.csv("genome_module.csv",    row.names = 1)
+
+## top 2 = annotation rows, remove
+annot  <- geno_raw[1:2,] |> t() |> as.data.frame()
+geno   <- geno_raw[-1:-2,]
+
+
+## ------------------------------------------------------------
+## 2. Merge MAG metadata + niche values
+## ------------------------------------------------------------
+merge_mags_niche <- function(niche, mags){
+  ids  <- intersect(rownames(niche), rownames(mags))
+  cbind(mags[ids,], niche[ids,]) |> as.data.frame()
+}
+
+dat_f <- merge_mags_niche(niche_f, mags)
+dat_g <- merge_mags_niche(niche_g, mags)
+dat_w <- merge_mags_niche(niche_w, mags)
+
+
+## ------------------------------------------------------------
+## 3. Extract genome modules
+## ------------------------------------------------------------
+extract_geno <- function(dat, geno){
+  g <- geno[dat$Name,]
+  g <- as.data.frame(lapply(g, as.numeric))
+  rownames(g) <- rownames(g)
+  g
+}
+
+geno_f <- extract_geno(dat_f, geno)
+geno_g <- extract_geno(dat_g, geno)
+geno_w <- extract_geno(dat_w, geno)
+
+
+## ------------------------------------------------------------
+## 4. GLM function
+## test slope significance against niche
+## ------------------------------------------------------------
+glm_test <- function(dat, geno){
+  
+  dat2 <- cbind(
+    niche = dat$meanFunction,
+    ASV   = rownames(dat),
+    genome= rownames(geno),
+    geno
+  )
+
+  mods  <- colnames(geno)
+  out   <- NULL
+  
+  for(i in mods){
+    m  <- glm(dat2[,i] ~ niche, dat2, family = binomial)
+    wt <- wald.test(m, terms = 2)
+    
+    out <- rbind(out,
+                 cbind(slope = m$coefficients[2],
+                       p     = wt$pvalue))
+  }
+  
+  out <- as.data.frame(out)
+  rownames(out) <- mods
+  out
+}
+
+glm_f <- glm_test(dat_f, geno_f)
+glm_g <- glm_test(dat_g, geno_g)
+glm_w <- glm_test(dat_w, geno_w)
+
+
+## ------------------------------------------------------------
+## 5. Keep significant slopes
+## ------------------------------------------------------------
+sig_f <- filter(glm_f, p < 0.05)
+sig_g <- filter(glm_g, p < 0.05)
+sig_w <- filter(glm_w, p < 0.05)
+
+
+## ------------------------------------------------------------
+## 6. Find shared significant modules
+## across ecosystems
+## ------------------------------------------------------------
+fg  <- intersect(rownames(sig_f), rownames(sig_g))
+fw  <- intersect(rownames(sig_f), rownames(sig_w))
+gw  <- intersect(rownames(sig_g), rownames(sig_w))
+fgw <- union(fg, fw)
+total <- union(fgw, gw) |> as.data.frame()
+colnames(total) <- "name"
+
+
+## ------------------------------------------------------------
+## 7. build presence table (3 ecosystems)
+## ------------------------------------------------------------
+presence <- tibble(
+  name = total$name,
+  F = ifelse(total$name %in% rownames(sig_f),1,0),
+  G = ifelse(total$name %in% rownames(sig_g),1,0),
+  W = ifelse(total$name %in% rownames(sig_w),1,0)
+)
+
+presence <- left_join(presence, annot, by="name")
+
+
+## ------------------------------------------------------------
+## 8. Encode effect direction (+/-)
+## ------------------------------------------------------------
+encode_sign <- function(sig){
+  s <- sig
+  s$slope[s$slope >0] <- 1
+  s$slope[s$slope <0] <- -1
+  s$slope
+}
+
+presence$F <- presence$F * encode_sign(sig_f)[presence$name]
+presence$G <- presence$G * encode_sign(sig_g)[presence$name]
+presence$W <- presence$W * encode_sign(sig_w)[presence$name]
+
+presence$sum <- rowSums(presence[,2:4])
+
+
+## ------------------------------------------------------------
+## 9. Keep modules that show directional consistency
+## ------------------------------------------------------------
+presence_final <- filter(presence, sum != 0)
+
+
+## ------------------------------------------------------------
+## 10. Correlations among modules
+## ------------------------------------------------------------
+gf <- geno_f[, presence_final$name]
+gg <- geno_g[, presence_final$name]
+gw <- geno_w[, presence_final$name]
+
+ct <- corr.test(gf, method="spearman", adjust="fdr")
+R  <- ct$r
+P  <- ct$p
+
+P[P >= 0.05] <- 0
+P[P <  0.05] <- 1
+
+R_mask <- R * P
+
+
+## ------------------------------------------------------------
+## 11. Clustering
+## ------------------------------------------------------------
+dist_mat <- as.dist(1 - abs(R))
+hc <- hclust(dist_mat, method="average")
+dend <- as.dendrogram(hc)
+
+ord <- rev(colnames(gf)[order.dendrogram(dend)])
+R_ord <- R[ord, ord]
+diag(R_ord) <- NA
+
+
+## ------------------------------------------------------------
+## 12. Plot heatmap for Fig.5d
+## ------------------------------------------------------------
+pal <- colorRampPalette(c("#77AADD","#4477AA","#FFFFFF","#EE9988","#BB4444"))
+
+pdf("Fig5d_module_corr_heatmap.pdf", width=10,height=10)
+corrplot(
+  R_ord,
+  method="square",
+  na.label=" ",
+  col = pal(200),
+  tl.col="black",
+  rect.col="grey",
+  addgrid.col="grey"
+)
+dev.off()
+
+###############################################################
+## END
+###############################################################
