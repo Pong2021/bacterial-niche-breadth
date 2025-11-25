@@ -1,0 +1,127 @@
+```r
+############################################################
+# Script: Figure 4 
+# Purpose: Analyze association between MAG genomic modules and niche breadth
+############################################################
+
+#================= Load packages =================#
+library(tidyverse)
+library(patchwork)
+library(psych)
+library(vegan)
+library(RColorBrewer)
+library(mdscore)
+library(MASS)
+library(ResourceSelection)   # Hosmer-Lemeshow test
+
+#================= Load input files =================#
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+
+mags <- read.csv("mags_basal.csv", row.names = 1)
+geno_modu <- read.csv("genome_module.csv", row.names = 1)
+
+# extract module annotation & clean header
+mod_anno <- geno_modu[1:2,] %>% t() %>% as.data.frame()
+colnames(mod_anno) <- c("name","pathway")
+geno_modu <- geno_modu[-1:-2,]   # remove annotation rows
+
+#================= utilities =================#
+prepare_dataset <- function(niche, mags){
+  com <- intersect(rownames(niche), rownames(mags))
+  cbind(mags[com,], niche[com,]) %>% as.data.frame()
+}
+
+run_binomial_models <- function(df, geno_matrix){
+  # convert presence/absence
+  gm <- geno_matrix
+  gm[gm > 0] <- 1
+  da <- cbind(df$meanFunction, rownames(df), rownames(gm), gm)
+  colnames(da)[1:3] <- c("niche","ASV","genome")
+
+  vars <- colnames(da)[4:ncol(da)]
+  out <- map_dfr(vars, function(v){
+    mod <- glm(da[,v] ~ niche, da, family = binomial)
+    wt <- wald.test(mod, terms = 2)
+    tibble(name=v, slope=coef(mod)[2], p=wt$pvalue, R2 = with(summary(mod),1-deviance/null.deviance))
+  })
+  out
+}
+
+#================= prepare data =================#
+dat_f <- prepare_dataset(niche_f, mags)
+dat_g <- prepare_dataset(niche_g, mags)
+dat_w <- prepare_dataset(niche_w, mags)
+
+# subset module matrix for each ecosystem
+gf <- geno_modu[dat_f$Name,] %>% mutate_all(as.numeric)
+gg <- geno_modu[dat_g$Name,] %>% mutate_all(as.numeric)
+gw <- geno_modu[dat_w$Name,] %>% mutate_all(as.numeric)
+
+rownames(gf) <- dat_f$Name
+rownames(gg) <- dat_g$Name
+rownames(gw) <- dat_w$Name
+
+#================= run models =================#
+res_f <- run_binomial_models(dat_f, gf)
+res_g <- run_binomial_models(dat_g, gg)
+res_w <- run_binomial_models(dat_w, gw)
+
+#================= extract significant modules =================#
+f_sig <- filter(res_f, p < 0.05)
+g_sig <- filter(res_g, p < 0.05)
+w_sig <- filter(res_w, p < 0.05)
+
+write.csv(f_sig,"module_forest_R2.csv")
+write.csv(g_sig,"module_grassland_R2.csv")
+write.csv(w_sig,"module_wetland_R2.csv")
+
+#================= shared modules =================#
+fg <- intersect(rownames(f_sig), rownames(g_sig))
+fw <- intersect(rownames(f_sig), rownames(w_sig))
+gw <- intersect(rownames(g_sig), rownames(w_sig))
+
+all_mods <- union(union(fg,fw),gw) %>% as.data.frame()
+colnames(all_mods) <- "name"
+
+#================= indicator matrix =================#
+make_indicator <- function(mod, tag){ mod %>% mutate(!!tag := 1) }
+
+mat <- reduce(
+  list(make_indicator(as.data.frame(fg),"forest"),
+       make_indicator(as.data.frame(fw),"grass"),
+       make_indicator(as.data.frame(gw),"wet")),
+  full_join, by="name")
+
+mat[is.na(mat)] <- 0
+
+# merge pathway info
+mat <- left_join(mat, mod_anno, by=c("name"="name"))
+
+#================= sign of slopes =================#
+res_f2 <- res_f[mat$name,]; res_f2$slope <- sign(res_f2$slope)
+res_g2 <- res_g[mat$name,]; res_g2$slope <- sign(res_g2$slope)
+res_w2 <- res_w[mat$name,]; res_w2$slope <- sign(res_w2$slope)
+
+mat$forest <- mat$forest * res_f2$slope
+mat$grass  <- mat$grass  * res_g2$slope
+mat$wet    <- mat$wet    * res_w2$slope
+
+mat <- mat %>% filter(forest+grass+wet != 0)
+
+#================= reshape for heatmap =================#
+hm <- pivot_longer(mat, cols=c(forest,grass,wet), names_to="ecosystem", values_to="value")
+
+#================= draw heatmap =================#
+p <- ggplot(hm, aes(x=name, y=pathway, fill=value))+
+  geom_tile()+
+  scale_fill_gradient2(low="#eeb033", high="#85b22e", mid="white")+
+  theme_minimal()+
+  theme(axis.text.x=element_text(angle=90,hjust=0.5,vjust=0.5))+
+  xlab(NULL)+ylab(NULL)
+
+ggsave(p, file="module_heatmap2.pdf", width=10, height=10)
+
+write.csv(mat,"module_heatmap2.csv")
+```
