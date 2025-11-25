@@ -185,10 +185,6 @@ total3$ww[total3$name %in% ko_ww_sig$ko] <- 1
 
 # ---- 读取 kegg 与 map_ko 映射（原脚本后续用到） ----
 kegg <- safe_read("data/kegg.csv")
-map_ko <- safe_read("data/map_ko_name.csv")
-colnames(map_ko)[1] <- "ko"
-kegg_path <- safe_read("data/KEGG_pathway_ko.csv")
-colnames(kegg_path)[1] <- "level1_pathway_id"
 
 # ---- 处理方向（slope）信息：把 slope 置为 -1/1 ----
 # 从各生态系统的 ko_stats 中取出 slope 并转化
