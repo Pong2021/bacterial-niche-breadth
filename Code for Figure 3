@@ -1,0 +1,268 @@
+# --- Project: Functional Diversity and Niche Width Analysis (Figure 3) ---
+
+# This script analyzes the relationship between microbial functional diversity (FD) 
+# and niche width (meanFunction) across three ecosystems: Forest, Grassland, and Wetland.
+
+# 1. Load Libraries
+library(tidyverse)
+library(patchwork)
+library(psych)   # For corr.test
+library(vegan)   # For specnumber (functional diversity)
+library(RColorBrewer)
+
+# Set the KEGG categories based on the user's original logic
+KEGG_CATEGORIES <- list(
+  "Metabolism" = "Metabolism",
+  "Brite" = "Brite Hierarchies",
+  "Cellular" = "Cellular Processes",
+  "Environmental" = "Environmental Information Processing",
+  "Genetic" = "Genetic Information Processing",
+  "Organismal" = "Organismal Systems"
+)
+
+# 2. Load Core Data (Assuming files are in the working directory)
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+mags <- read.csv("mags_basal.csv", row.names = 1)
+geno_modu <- read.csv("genome_module.csv", row.names = 1)
+kegg_map <- read.csv("kegg.csv", row.names = 1)
+ko_f <- read.csv("ko_number_forest.csv", row.names = 1)
+ko_g <- read.csv("ko_number_grassland.csv", row.names = 1)
+ko_w <- read.csv("ko_number_wetland.csv", row.names = 1)
+
+# 3. Data Processing Function
+#' @title Processes Data, Calculates FD, and Performs Correlation Test
+#' @description Aligns niche, MAGs, and KO data, calculates Functional Diversity 
+#' (total and by KEGG category), and correlates FD with niche width.
+#' @param niche_df Niche data (niche_f, niche_g, or niche_w)
+#' @param ko_df KO number table (ko_f, ko_g, or ko_w)
+#' @param env_name Name of the environment ("forest", "grassland", "wetland")
+#' @return A list containing:
+#'         - 'result_data': Data frame of niche, FD, and specific FD metrics.
+#'         - 'correlation_test': The output of the corr.test function.
+process_ecosystem_data <- function(niche_df, ko_df, env_name) {
+  message(paste("--- Processing", env_name, "data ---"))
+  
+  # --- Step 3.1: Align Niche and MAGs Data ---
+  # Find intersection of rownames (ASVs/MAGs) between niche data and MAGs table
+  common_mags <- intersect(rownames(niche_df), rownames(mags))
+  dat <- cbind(mags[common_mags,], niche_df[common_mags,]) %>% 
+    as.data.frame()
+  
+  # Filter genome module data based on the aligned data (for rownames alignment)
+  # NOTE: The original code uses rownames(dat_f$Name) which implies `Name` is a column 
+  # in mags_basal.csv containing genome IDs. We align using the ASV/MAG ID intersection.
+  # We assume dat$Name holds the genome ID for filtering geno_modu later if needed, 
+  # but for KO processing, we rely on ko_df filtering.
+
+  # --- Step 3.2: Process KO Data (KO count matrix) ---
+  ko_num <- ko_df %>% 
+    dplyr::select(genome, ko_number) %>% # Assuming ko_df has genome and ko_number
+    mutate(value = 1) %>%
+    # Aggregate to ensure unique genome-KO pairs have a value of 1
+    group_by(genome, ko_number) %>%
+    summarise(value = sum(value), .groups = 'drop')
+  
+  # Pivot to wide format (Genome x KO)
+  ko_n <- ko_num %>% 
+    pivot_wider(names_from = ko_number, values_from = value, values_fill = 0) %>%
+    as.data.frame()
+  
+  # Ensure the resulting matrix only contains MAGs that are also in the dat (niche/MAGs)
+  # Filter KO table rows (genomes) to match the aligned MAGs/ASVs in 'dat'
+  genomes_to_keep <- dat$Name[dat$Name %in% ko_n$genome]
+  ko_n2 <- ko_n %>%
+    filter(genome %in% genomes_to_keep) %>%
+    column_to_rownames("genome")
+  
+  # Binarize the matrix (Presence/Absence)
+  ko_n2[ko_n2 > 0] <- 1
+  ko_n2 <- as.data.frame(ko_n2)
+  
+  # Filter 'dat' to match the final KO matrix rows
+  dat_final <- dat[dat$Name %in% rownames(ko_n2), ]
+  
+  # Re-order KO matrix to match dat_final order (essential for cbind)
+  ko_n2 <- ko_n2[dat_final$Name, ]
+  
+  # --- Step 3.3: Calculate Functional Diversity (FD) Metrics ---
+  # Total Functional Diversity (specnumber is the count of unique KOs per genome)
+  div_total <- specnumber(ko_n2)
+  
+  # Functional Diversity by KEGG Primary Category
+  fd_list <- list(div = div_total)
+  for (cat_key in names(KEGG_CATEGORIES)) {
+    kegg_cat_name <- KEGG_CATEGORIES[[cat_key]]
+    
+    # 1. Filter KEGG map for the primary category
+    kegg_meta <- dplyr::filter(kegg_map, first %in% kegg_cat_name)
+    
+    # 2. Find common KOs between the map and the KO matrix
+    common_kos <- intersect(kegg_meta$fourth, colnames(ko_n2))
+    
+    if (length(common_kos) > 0) {
+      # 3. Subset the KO matrix and calculate FD
+      ko_meta <- ko_n2[, common_kos, drop = FALSE]
+      fd_list[[paste0("div_", tolower(cat_key))]] <- specnumber(ko_meta)
+    } else {
+      # If no KOs are found for the category, use 0
+      fd_list[[paste0("div_", tolower(cat_key))]] <- rep(0, nrow(ko_n2))
+    }
+  }
+  
+  # --- Step 3.4: Combine and Correlate ---
+  # Combine niche data with FD metrics
+  aa <- dat_final %>% 
+    dplyr::select(meanFunction) %>%
+    bind_cols(fd_list)
+  
+  colnames(aa)[1] <- "niche" # Rename meanFunction column
+  aa$ecosystem <- env_name
+  aa$genome <- rownames(aa)
+  
+  # Perform correlation test
+  correlation_test <- corr.test(aa$niche, aa[, 2:ncol(aa)], method = "pearson", adjust = "fdr") 
+  
+  return(list(result_data = aa, correlation_test = correlation_test))
+}
+
+# --- 4. Execute Analysis for All Ecosystems ---
+results_f <- process_ecosystem_data(niche_df = niche_f, ko_df = ko_f, env_name = "Forest")
+results_g <- process_ecosystem_data(niche_df = niche_g, ko_df = ko_g, env_name = "Grassland")
+results_w <- process_ecosystem_data(niche_df = niche_w, ko_df = ko_w, env_name = "Wetland")
+
+# Combine results for plotting and final table
+all_data <- bind_rows(results_f$result_data, results_g$result_data, results_w$result_data)
+cor_f <- results_f$correlation_test
+cor_g <- results_g$correlation_test
+cor_w <- results_w$correlation_test
+
+# --- 5. Generate Scatter Plots (Figure 3 A, B, C) ---
+# Function to generate individual scatter plots
+plot_lm_func <- function(data, env_name) {
+  ggplot(data, aes(x = div, y = niche)) +
+    geom_point(alpha = 0.3, size = 2, color = "darkgreen") +
+    geom_smooth(method = "lm", se = FALSE, color = "#BB4444") +
+    labs(
+      title = paste(env_name, "Ecosystem"),
+      x = "Total Functional Diversity (KO Count)",
+      y = "Niche Width (meanFunction)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      panel.grid.major = element_line(colour = "gray90"),
+      panel.grid.minor = element_blank()
+    )
+}
+
+plot_ff <- plot_lm_func(results_f$result_data, "Forest")
+plot_gg <- plot_lm_func(results_g$result_data, "Grassland")
+plot_ww <- plot_lm_func(results_w$result_data, "Wetland")
+
+# Combine plots using patchwork
+combined_plot_lm <- plot_ff + plot_gg + plot_ww +
+  plot_layout(nrow = 1)
+
+# Save the combined scatter plot
+ggsave(combined_plot_lm, file = "FD_niche_lm.pdf", width = 12, height = 4)
+message("Saved scatter plots to FD_niche_lm.pdf")
+
+
+# --- 6. Generate Correlation Heatmap (Figure 3 D) ---
+
+# Extract and combine correlation R and P values
+cor_r <- rbind(cor_f$r, cor_g$r, cor_w$r)
+cor_p <- rbind(cor_f$p.adj, cor_g$p.adj, cor_w$p.adj)
+
+# Prepare for long format plotting
+cor_r_df <- as.data.frame(cor_r)
+cor_p_df <- as.data.frame(cor_p)
+
+# Assign ecosystem and type of metric (R-value or P-value)
+cor_r_df$Ecosystem <- c("Forest", "Grassland", "Wetland")
+cor_p_df$Ecosystem <- c("Forest", "Grassland", "Wetland")
+
+# Melt R-values into long format
+cor_r_long <- cor_r_df %>%
+  pivot_longer(cols = -Ecosystem, names_to = "FD_Category", values_to = "R_value") %>%
+  mutate(Type = "R")
+
+# Melt P-values into long format
+cor_p_long <- cor_p_df %>%
+  pivot_longer(cols = -Ecosystem, names_to = "FD_Category", values_to = "P_value") %>%
+  mutate(Type = "P")
+
+# Combine R and P values
+heatmap_data <- full_join(cor_r_long, cor_p_long, by = c("Ecosystem", "FD_Category")) %>%
+  # Filter out the "niche" vs "niche" correlation row
+  filter(FD_Category != "niche") %>%
+  # Adjust category labels for better visualization
+  mutate(FD_Category = recode(FD_Category, 
+                              "div" = "Total FD",
+                              "div_meta" = "Metabolism",
+                              "div_brite" = "Brite Hierarchies",
+                              "div_cell" = "Cellular Processes",
+                              "div_envi" = "Environmental IP",
+                              "div_gene" = "Genetic IP",
+                              "div_orga" = "Organismal Systems"))
+
+# Reorder categories for better plot layout
+heatmap_data$FD_Category <- factor(heatmap_data$FD_Category, 
+                                   levels = rev(unique(heatmap_data$FD_Category)))
+
+
+# The Heatmap Plot
+plot_heatmap <- ggplot(heatmap_data, aes(x = Ecosystem, y = FD_Category, fill = R_value)) +
+  geom_raster() +
+  scale_fill_gradientn(
+    colors = c("#053061", "#F7F7F7", "#67001F"), # Diverging color scale (Blue-White-Red)
+    values = scales::rescale(c(min(heatmap_data$R_value), 0, max(heatmap_data$R_value))),
+    limit = c(min(heatmap_data$R_value), max(heatmap_data$R_value)),
+    name = "Pearson's R"
+  ) +
+  # Add significance stars/dots
+  geom_text(
+    aes(label = ifelse(P_value < 0.05, 
+                       ifelse(P_value < 0.01, ifelse(P_value < 0.001, "***", "**"), "*"), 
+                       "")),
+    color = "black", size = 5, fontface = "bold"
+  ) +
+  labs(
+    title = "Correlation between Niche Width and Functional Diversity",
+    x = NULL,
+    y = "Functional Diversity Category"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),
+    panel.grid = element_blank()
+  )
+
+plot_heatmap
+
+# Save the heatmap plot
+ggsave(plot_heatmap, file = "FD_niche_heatmap.pdf", width = 8, height = 6)
+message("Saved correlation heatmap to FD_niche_heatmap.pdf")
+
+
+# --- 7. Save Correlation Table ---
+# Create the combined correlation table for export
+cor_table <- data.frame(
+  FD_Category = rownames(cor_f$r),
+  R_Forest = cor_f$r[,1],
+  P_Forest = cor_f$p.adj[,1],
+  R_Grassland = cor_g$r[,1],
+  P_Grassland = cor_g$p.adj[,1],
+  R_Wetland = cor_w$r[,1],
+  P_Wetland = cor_w$w[,1]
+) %>%
+  # Remove the 'niche' row
+  filter(FD_Category != "niche")
+
+# Save the raw correlation results
+write.csv(cor_table, file = "FD_niche_correlation_table.csv", row.names = FALSE)
+message("Saved correlation results to FD_niche_correlation_table.csv")
