@@ -1,0 +1,107 @@
+##############################################
+## Fig.S4 — Class composition along niche bins
+##############################################
+
+library(tidyverse)
+library(viridis)
+library(RColorBrewer)
+library(patchwork)
+
+## --------------------------------------------------
+## 1. Load data
+## --------------------------------------------------
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+tax     <- read.csv("Taxonomy_Filter.csv", row.names = 1)
+
+
+## --------------------------------------------------
+## 2. Add taxonomy to each dataset
+## --------------------------------------------------
+add_tax <- function(niche, tax){
+  tax_sub <- tax[rownames(niche), , drop=FALSE]
+  cbind(niche, tax_sub) |> as.data.frame()
+}
+
+niche_f <- add_tax(niche_f, tax)
+niche_g <- add_tax(niche_g, tax)
+niche_w <- add_tax(niche_w, tax)
+
+
+## --------------------------------------------------
+## 3. Function: bin by meanFunction & count Classes
+## --------------------------------------------------
+count_class_bins <- function(dat, bins = seq(0,1,0.1)){
+  
+  # cut to factor bins
+  dat$bin <- cut(dat$meanFunction,
+                 breaks = bins,
+                 include.lowest = TRUE,
+                 labels = paste0("bin_", seq_len(length(bins)-1)))
+  
+  # summary table
+  tab <- table(dat$Class, dat$bin) |> as.data.frame()
+  colnames(tab) <- c("Class","bin","Count")
+  
+  tab
+}
+
+
+## --------------------------------------------------
+## 4. Define top classes
+## --------------------------------------------------
+top_class <- c(
+  "Gitt-GS-136","bacteriap25","Nitrospiria","Subgroup 22","KD4-96",
+  "Methylomirabilia","Thermoanaerobaculia","MB-A2-108","Holophagae",
+  "Phycisphaerae","Polyangia","Acidimicrobiia","Verrucomicrobiae",
+  "Anaerolineae","Blastocatellia","Gemmatimonadetes","Thermoleophilia",
+  "Bacteroidia","Actinobacteria","Vicinamibacteria","Acidobacteriae",
+  "Gammaproteobacteria","Alphaproteobacteria"
+)
+
+## --------------------------------------------------
+## 5. Custom colors (manual)
+## --------------------------------------------------
+col4 <- c(
+  "Acidimicrobiia"="#A6CEE3","Acidobacteriae"="#68A6CD","Actinobacteria"="#2A7FB7",
+  "Alphaproteobacteria"="#569EA4","Anaerolineae"="#99CD91","bacteriap25"="#8CCC6E",
+  "Bacteroidia"="#52AF43","Blastocatellia"="#5C9E42","Gammaproteobacteria"="#B89B74",
+  "Gemmatimonadetes"="#F88A89","Gitt-GS-136"="#ED4F50","Holophagae"="#E4201F",
+  "KD4-96"="#F06C45","MB-A2-108"="#FBB86B","Methylomirabilia"="#FDA440",
+  "Nitrospiria"="#FE870D","Phycisphaerae"="#ED8F47","Polyangia"="#D5A7A9",
+  "Subgroup 22"="#B294C7","Thermoanaerobaculia"="#865FAB",
+  "Thermoleophilia"="#825D99","Verrucomicrobiae"="#C7B699",
+  "Vicinamibacteria"="#F8F18F","other"="#D4A55B"
+)
+
+
+## --------------------------------------------------
+## 6. Plot function
+## --------------------------------------------------
+plot_class_bar <- function(tab){
+
+  tab <- tab |> mutate(Class2 = ifelse(Class %in% top_class, Class, "other"))
+
+  ggplot(tab, aes(x = bin, y = Count, fill = Class2)) +
+    geom_bar(stat="identity", position="fill") +
+    scale_fill_manual(values = col4) +
+    labs(x="", y="Proportion", fill="Class") +
+    theme_bw() +
+    theme(
+      axis.text = element_text(color="black", size=11),
+      legend.position = "top",
+      panel.grid = element_blank(),
+      panel.background = element_rect(color='black', fill='transparent')
+    )
+}
+
+
+## --------------------------------------------------
+## 7. Run for forest
+## --------------------------------------------------
+tab_f <- count_class_bins(niche_f)
+
+plot_f <- plot_class_bar(tab_f)
+
+ggsave(plot_f, file = "Class_barplot.pdf", width = 7, height = 7)
