@@ -1,0 +1,70 @@
+# -----------------------------------------------------
+#   Code for Figure 2b
+#   Plot genome niche distributions across ecosystems
+# -----------------------------------------------------
+
+# ---- Load packages ----
+library(tidyverse)
+library(patchwork)
+
+# ---- Load data ----
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+niche_g <- read.csv("niche_grassland.csv", row.names = 1)
+niche_w <- read.csv("niche_wetland.csv", row.names = 1)
+
+mags      <- read.csv("mags_basal.csv", row.names = 1)
+geno_modu <- read.csv("genome_module.csv", row.names = 1)
+
+
+# ---- Example check of genome module info (not used below) ----
+a <- geno_modu[1:2,] %>% t() %>% as.data.frame()
+colnames(a) <- c("name", "pathway")
+
+
+# ---- Function: merge MAG and niche data and return combined df ----
+merge_niche <- function(niche_df, mags_df) {
+  shared <- intersect(rownames(niche_df), rownames(mags_df))
+  mags_sub   <- mags_df[shared, , drop = FALSE]
+  niche_sub  <- niche_df[shared, , drop = FALSE]
+  cbind(mags_sub, niche_sub) %>% as.data.frame()
+}
+
+
+# ---- Merge datasets ----
+dat_f <- merge_niche(niche_f, mags)
+dat_g <- merge_niche(niche_g, mags)
+dat_w <- merge_niche(niche_w, mags)
+
+
+# ---- Function: make histogram ----
+plot_hist <- function(df, title = "") {
+  ggplot(df, aes(x = meanFunction)) +
+    geom_histogram(binwidth = 0.01, fill = "#ccd5ae") +
+    theme_classic() +
+    ggtitle(title) +
+    theme(
+      axis.text = element_text(colour = 'black', size = 11),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+
+
+# ---- Build individual plots ----
+plot_f <- plot_hist(dat_f, "Forest")
+plot_g <- plot_hist(dat_g, "Grassland")
+plot_w <- plot_hist(dat_w, "Wetland")
+
+# ---- Combine ----
+p <- plot_f + plot_g + plot_w
+
+# ---- Display ----
+p
+
+# ---- Save ----
+ggsave(
+  p,
+  filename = "Fig2b.pdf",
+  width = 12,
+  height = 3
+)
