@@ -1,0 +1,117 @@
+###############################################
+# Figure 6: microbial strategies analysis
+###############################################
+
+# Load libraries
+library(tidyverse)
+library(psych)
+library(vegan)
+library(ggpmisc)
+
+# -------------------------------
+# 1. Read data
+# -------------------------------
+niche_f <- read.csv("niche_forest.csv", row.names = 1)
+mags <- read.csv("mags_basal.csv", row.names = 1)
+geno_modu <- read.csv("genome_module.csv", row.names = 1)
+
+# Extract metadata from genome_module
+a <- geno_modu[1:2,] %>% t() %>% as.data.frame()
+colnames(a) <- c("name", "pathway")
+
+# Keep only ASVs present in both niche and genome data
+aa <- intersect(rownames(niche_f), rownames(mags))
+mags_f <- mags[aa,]
+niche_ff <- niche_f[aa,]
+dat_f <- cbind(mags_f, niche_ff) %>% as.data.frame()
+
+# Remove first two rows (metadata) from genome module
+geno_modu <- geno_modu[-1:-2,]
+
+# Select genome data for forest ASVs
+geno_f <- geno_modu[dat_f$Name,] %>% 
+  lapply(as.numeric) %>% 
+  as.data.frame()
+rownames(geno_f) <- rownames(dat_f)
+
+# -------------------------------
+# 2. Define function to calculate trait sums
+# -------------------------------
+calc_trait_sum <- function(geno_data, cols, trait_name){
+  df <- dplyr::select(geno_data, all_of(cols))
+  df$sum <- rowSums(df)/length(cols)
+  return(df$sum)
+}
+
+# -------------------------------
+# 3. Calculate resource/growth/stress/competition scores
+# -------------------------------
+da_f <- data.frame(
+  niche = as.numeric(dat_f$meanFunction),
+  ASV = rownames(dat_f),
+  genome = rownames(geno_f),
+  resource = calc_trait_sum(geno_f, c(
+    "M00539","M00544","M00551","M00169","M00579", 
+    "M00127","M00128","M00572","M00810","M00357", 
+    "M00563","M00529","M00530","M00804","M00176","M00595"), "resource"),
+  growth = calc_trait_sum(geno_f, c(
+    "M00143","M00159","M00416","M00417","M00309",
+    "M00580","M00025","M00040","M00083"), "growth"),
+  stress = calc_trait_sum(geno_f, c(
+    "M00641","M00642","M00718","M00745","M00089", 
+    "M00093","M00060","M00063","M00064","M00866", 
+    "M00030","M00433","M00133","M00136"), "stress"),
+  competition = calc_trait_sum(geno_f, c("M00542","M00564"), "competition")
+)
+
+# -------------------------------
+# 4. Calculate mean trait score & Pielou evenness
+# -------------------------------
+da_f$mean <- rowSums(da_f[,c("resource","growth","stress","competition")])/4
+
+# Calculate Pielou evenness from genome traits
+geno_subset <- geno_f[, c(
+  "M00539","M00544","M00551","M00169","M00579", 
+  "M00127","M00128","M00572","M00810","M00357", 
+  "M00563","M00529","M00530","M00804","M00176","M00595",
+  "M00143","M00159","M00416","M00417","M00309",
+  "M00580","M00025","M00040","M00083",
+  "M00641","M00642","M00718","M00745","M00089", 
+  "M00093","M00060","M00063","M00064","M00866", 
+  "M00030","M00433","M00133","M00136",
+  "M00542","M00564"
+)]
+Pielou_evenness <- diversity(geno_subset, index = "shannon") / log(specnumber(geno_subset))
+da_f$Pielou_evenness <- Pielou_evenness
+
+# -------------------------------
+# 5. Correlation tests
+# -------------------------------
+# Pearson and Spearman correlations
+corr.test(da_f$niche, da_f$mean, method="pearson", adjust="fdr")
+corr.test(da_f$niche, da_f$mean, method="spearman", adjust="fdr")
+corr.test(da_f$niche, da_f$Pielou_evenness, method="pearson", adjust="fdr")
+corr.test(da_f$niche, da_f$Pielou_evenness, method="spearman", adjust="fdr")
+
+# -------------------------------
+# 6. Plot trait vs niche
+# -------------------------------
+plot_mean <- ggplot(da_f, aes(x=mean, y=niche)) +
+  geom_point(alpha=0.3, size=2) +
+  geom_smooth(method="lm", se=FALSE) +
+  stat_poly_eq(use_label(c("eq","R2","p.value.label")), size=2) +
+  theme_classic() +
+  labs(x="Mean trait score", y="Niche breadth")
+
+plot_evenness <- ggplot(da_f, aes(x=Pielou_evenness, y=niche)) +
+  geom_point(alpha=0.3, size=2) +
+  geom_smooth(method="lm", se=FALSE) +
+  stat_poly_eq(use_label(c("eq","R2","p.value.label")), size=2) +
+  theme_classic() +
+  labs(x="Pielou evenness", y="Niche breadth")
+
+# Combine plots side by side
+plot_final <- plot_mean + plot_evenness
+
+# Save figure
+ggsave(plot_final, file="Figure6_forest_strategies.pdf", width=10, height=6)
